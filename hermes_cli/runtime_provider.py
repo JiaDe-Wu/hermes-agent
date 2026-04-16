@@ -811,34 +811,15 @@ def resolve_runtime_provider(
                 guardrail_config["streamProcessingMode"] = _gr["stream_processing_mode"]
             if _gr.get("trace"):
                 guardrail_config["trace"] = _gr["trace"]
-        # Dual-path routing: Claude models use AnthropicBedrock SDK for full
-        # feature parity (prompt caching, thinking budgets, adaptive thinking).
-        # Non-Claude models use the Converse API for multi-model support.
-        from agent.bedrock_adapter import is_anthropic_bedrock_model
-        _current_model = str(model_cfg.get("default") or "").strip()
-        if is_anthropic_bedrock_model(_current_model):
-            # Claude on Bedrock → AnthropicBedrock SDK → anthropic_messages path
-            runtime = {
-                "provider": "bedrock",
-                "api_mode": "anthropic_messages",
-                "base_url": f"https://bedrock-runtime.{region}.amazonaws.com",
-                "api_key": "aws-sdk",
-                "source": auth_source,
-                "region": region,
-                "bedrock_anthropic": True,  # Signal to use AnthropicBedrock client
-                "requested_provider": requested_provider,
-            }
-        else:
-            # Non-Claude (Nova, DeepSeek, Llama, etc.) → Converse API
-            runtime = {
-                "provider": "bedrock",
-                "api_mode": "bedrock_converse",
-                "base_url": f"https://bedrock-runtime.{region}.amazonaws.com",
-                "api_key": "aws-sdk",
-                "source": auth_source,
-                "region": region,
-                "requested_provider": requested_provider,
-            }
+        runtime = {
+            "provider": "bedrock",
+            "api_mode": "bedrock_converse",
+            "base_url": f"https://bedrock-runtime.{region}.amazonaws.com",
+            "api_key": "aws-sdk",
+            "source": auth_source,
+            "region": region,
+            "requested_provider": requested_provider,
+        }
         if guardrail_config:
             runtime["guardrail_config"] = guardrail_config
         return runtime
