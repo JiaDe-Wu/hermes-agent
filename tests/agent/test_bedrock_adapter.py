@@ -1056,6 +1056,41 @@ class TestBedrockContextProbe:
             assert probe_bedrock_context_length("some.unlisted-model", "us-east-1") == 200_000
         assert client.converse.call_count == 2
 
+    def test_accepted_tier_escalates_to_read_the_real_window(self):
+        # A tier that fits only proves "at least this much". The next tier is what
+        # makes Bedrock quote the number, so a 2M model must resolve to 2M and not
+        # to the 1,300,000 the first tier would have reported.
+        from agent.bedrock_adapter import probe_bedrock_context_length
+        client = self._client_with(
+            {"usage": {"inputTokens": 1_444_444}},
+            Exception("This model\'s maximum context length is 2000000 tokens. "
+                      "Please reduce the length of the prompt"))
+        with patch("agent.bedrock_adapter._get_bedrock_runtime_client", return_value=client):
+            assert probe_bedrock_context_length("some.unlisted-model", "us-east-1") == 2_000_000
+        assert client.converse.call_count == 2
+
+    def test_accepted_floor_does_not_mask_a_larger_table_value(self):
+        # Both tiers fit, so the probe knows only ">= 2.2M". Measured on Llama 4
+        # Scout, which accepts 2,222,258 tokens against a real 3,500,000 window:
+        # answering with the floor would cap it at two thirds, and a caller that
+        # persists probe results (agent/model_metadata.py) would keep that.
+        from agent.bedrock_adapter import BEDROCK_CONTEXT_LENGTHS, probe_bedrock_context_length
+        client = self._client_with(
+            {"usage": {"inputTokens": 1_444_444}}, {"usage": {"inputTokens": 2_444_444}})
+        with patch("agent.bedrock_adapter._get_bedrock_runtime_client", return_value=client), \
+                patch.dict(BEDROCK_CONTEXT_LENGTHS, {"test.wide-window": 5_000_000}):
+            assert probe_bedrock_context_length("test.wide-window-v1:0", "us-east-1") is None
+
+    def test_accepted_floor_answers_when_the_table_knows_less(self):
+        # For a model the table has never heard of, the floor is still the best
+        # thing available -- without it the caller falls to the 128K default.
+        from agent.bedrock_adapter import probe_bedrock_context_length
+        client = self._client_with(
+            {"usage": {"inputTokens": 1_444_444}}, {"usage": {"inputTokens": 2_444_444}})
+        with patch("agent.bedrock_adapter._get_bedrock_runtime_client", return_value=client):
+            assert probe_bedrock_context_length("some.unlisted-model", "us-east-1") == 2_200_000
+        assert client.converse.call_count == 2
+
 
     def test_probe_returns_none_when_client_unavailable(self):
         from agent.bedrock_adapter import probe_bedrock_context_length
