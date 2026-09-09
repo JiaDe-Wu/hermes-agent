@@ -1012,6 +1012,50 @@ class TestBedrockContextProbe:
         client.converse.side_effect = Exception(message)
         return client
 
+    def _client_with(self, *outcomes):
+        """Client whose successive converse() calls yield *outcomes* (a response dict or an Exception)."""
+        client = MagicMock()
+        client.converse.side_effect = list(outcomes)
+        return client
+
+    def test_throttle_at_a_tier_does_not_escalate(self):
+        # Measured against Converse: a 12.2 MB tier-2 payload came back as
+        # "ThrottlingException ... Too many tokens, please wait before trying
+        # again." after boto3 had already burned its four internal retries.
+        # Uploading a still larger prompt is the one reaction that cannot help.
+        from agent.bedrock_adapter import probe_bedrock_context_length
+        client = self._client_raising(
+            "An error occurred (ThrottlingException) when calling the Converse operation "
+            "(reached max retries: 4): Too many tokens, please wait before trying again.")
+        with patch("agent.bedrock_adapter._get_bedrock_runtime_client", return_value=client):
+            assert probe_bedrock_context_length("some.unlisted-model", "us-east-1") is None
+        assert client.converse.call_count == 1
+
+    def test_numberless_overflow_does_not_escalate(self):
+        # The other shape an over-padded prompt gets back, with no window in it.
+        # A bigger payload returns the identical sentence.
+        from agent.bedrock_adapter import probe_bedrock_context_length
+        client = self._client_raising(
+            "An error occurred (ValidationException) when calling the Converse "
+            "operation: Input is too long for requested model.")
+        with patch("agent.bedrock_adapter._get_bedrock_runtime_client", return_value=client):
+            assert probe_bedrock_context_length("some.unlisted-model", "us-east-1") is None
+        assert client.converse.call_count == 1
+
+    def test_opaque_server_error_still_escalates(self):
+        # The ladder exists for this case, so it has to keep working: an
+        # InternalServerException says nothing about length, and the next tier is
+        # what turns it into a parseable answer.
+        from agent.bedrock_adapter import probe_bedrock_context_length
+        client = self._client_with(
+            Exception("An error occurred (InternalServerException) when calling the "
+                      "Converse operation: Internal server error"),
+            Exception("This model\'s maximum context length is 200000 tokens. "
+                      "Please reduce the length of the prompt"))
+        with patch("agent.bedrock_adapter._get_bedrock_runtime_client", return_value=client):
+            assert probe_bedrock_context_length("some.unlisted-model", "us-east-1") == 200_000
+        assert client.converse.call_count == 2
+
 
     def test_probe_returns_none_when_client_unavailable(self):
         from agent.bedrock_adapter import probe_bedrock_context_length
