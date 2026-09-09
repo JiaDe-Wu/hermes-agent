@@ -993,6 +993,35 @@ class TestBedrockContextLength:
         assert get_bedrock_context_length("unknown.model-v1:0") == BEDROCK_DEFAULT_CONTEXT_LENGTH
 
 
+    def test_opus_5_is_not_treated_as_an_unknown_model(self):
+        # "anthropic.claude-opus-4" is not a substring of "...claude-opus-5", so without an entry of
+        # its own opus-5 matched nothing in the table and took the branch above - a 1M model driven
+        # on BEDROCK_DEFAULT_CONTEXT_LENGTH, an eighth of its window.
+        # Measured: Converse rejects a 1,444,500-token prompt with "> 1000000 maximum" for
+        # us.anthropic.claude-opus-5 and global.anthropic.claude-opus-5, in us-east-1 and us-east-2.
+        from agent.bedrock_adapter import get_bedrock_context_length
+        for model_id in ("us.anthropic.claude-opus-5", "global.anthropic.claude-opus-5"):
+            assert get_bedrock_context_length(model_id, probe=False) == 1_000_000
+        # The key must also survive a dated/versioned suffix, which is how Bedrock spells most IDs.
+        # This one is synthetic - the two above are the IDs the API actually lists today.
+        assert get_bedrock_context_length("us.anthropic.claude-opus-5-20260101-v1:0", probe=False) == 1_000_000
+
+
+    def test_every_1m_claude_in_the_generic_table_resolves_to_1m_here(self):
+        # The table states this as a requirement on itself: "The 1M entries must match
+        # agent/model_metadata.py DEFAULT_CONTEXT_LENGTHS or context compresses early."  Scoped to
+        # Claude deliberately - Bedrock really does serve less than the generic table for the OpenAI
+        # models (272K vs 1,050,000), so a blanket cross-table assert would be wrong.  Dotted keys
+        # are skipped: Bedrock model IDs spell versions with dashes, never dots.
+        from agent.bedrock_adapter import get_bedrock_context_length
+        from agent.model_metadata import DEFAULT_CONTEXT_LENGTHS
+        one_m = [k for k, v in DEFAULT_CONTEXT_LENGTHS.items()
+                 if v == 1_000_000 and k.startswith("claude") and "." not in k]
+        assert one_m, "no 1M Claude keys in the generic table - this guard would pass vacuously"
+        resolved = {k: get_bedrock_context_length("us.anthropic." + k, probe=False) for k in one_m}
+        assert {k: v for k, v in resolved.items() if v != 1_000_000} == {}
+
+
     def test_no_region_skips_probe_uses_table(self):
         # Default call (no region) must NOT hit the network — returns the
         # static table value.  Guards backward compatibility for callers that
