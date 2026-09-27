@@ -230,7 +230,18 @@ def ensure_import(extra: str) -> None:
                                f"run `{install_hint(extra)}` when you want it")
     from pm.client import sync_venv
 
-    sync_venv([extra])
+    try:
+        sync_venv([extra])
+    except InstallError as exc:
+        # Unlike the three raises above, "retry" IS the right advice here: the sync is the
+        # install and it failed for an environmental reason. What the generic default cannot
+        # say is WHAT to retry — the user reached this through an implicit extra install they
+        # never named, and every `raise InstallError` under `sync_venv` reports the package it
+        # was building, not the extra that asked for it. So keep the cause, name the extra.
+        raise InstallError(
+            exc.package, exc.cause,
+            f"retry, or run `{install_hint(extra)}`; if it keeps failing, run `hermes pm doctor`",
+        ) from exc
     # The sync published a new generation. Swap this process onto it when nothing
     # already imported would change underneath it (adopt_selected); otherwise only
     # a restart can load it.

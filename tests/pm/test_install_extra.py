@@ -1,10 +1,14 @@
 """`hermes pm install --extra NAME` is the one command every missing-extra hint names."""
+import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from pm import install_hint
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _wants_an_extra(monkeypatch, extras_mod, *, supported=True):
@@ -95,8 +99,14 @@ def test_a_platform_gated_extra_does_not_promise_an_install(monkeypatch):
 
     with pytest.raises(InstallError) as info:
         extras.ensure_import("neutts")
-    assert install_hint("neutts") not in info.value.remedy
+    # Excluding only the exact hint is too weak: a remedy of "run `hermes pm install`" satisfies
+    # it while still sending the user to install something that provably cannot build here.
+    assert "hermes pm install" not in info.value.remedy
     assert "hermes pm doctor" not in info.value.remedy
+    # And a pair of absences is satisfied by any string that merely omits both words, so the
+    # remedy must also positively say there is nothing to install, for this extra.
+    assert "nothing to install" in info.value.remedy
+    assert "neutts" in info.value.remedy
 
 
 def test_an_installed_extra_awaiting_restart_asks_for_a_restart(monkeypatch, tmp_path):
@@ -118,6 +128,82 @@ def test_an_installed_extra_awaiting_restart_asks_for_a_restart(monkeypatch, tmp
 
     with pytest.raises(InstallError) as info:
         extras.ensure_import("bedrock")
-    assert "restart" in info.value.remedy.lower()
-    assert install_hint("bedrock") not in info.value.remedy
+    assert "restart hermes" in info.value.remedy.lower()
+    assert "hermes pm install" not in info.value.remedy
     assert "hermes pm doctor" not in info.value.remedy
+
+
+def test_a_failed_sync_names_the_extra_that_asked_for_it(monkeypatch):
+    """The sync IS the install, so "retry" is right here — unlike the three raises above. What
+    the generic default cannot say is WHAT to retry: every `raise InstallError` under
+    `sync_venv` names the package it was building, not the extra that triggered the install."""
+    from pm import extras
+    from pm.package import InstallError
+
+    _wants_an_extra(monkeypatch, extras)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    def _network_died(extras_):
+        raise InstallError("venv", "install failed: boto3-1.34.59.tar.gz: connection reset")
+
+    monkeypatch.setattr("pm.client.sync_venv", _network_died)
+
+    with pytest.raises(InstallError) as info:
+        extras.ensure_import("bedrock")
+    # The cause the sync reported survives — it names the package that actually failed.
+    assert "boto3-1.34.59.tar.gz: connection reset" in info.value.cause
+    # The remedy adds the extra, which the cause cannot know about.
+    assert install_hint("bedrock") in info.value.remedy
+    assert "retry" in info.value.remedy.lower()
+    # Not the bare default, which says "retry" without saying what.
+    assert info.value.remedy != "retry, or run `hermes pm doctor`"
+
+
+def test_the_dashboard_entry_point_surfaces_the_extras_remedy(tmp_path):
+    """`hermes_cli/web_server.py` is the dashboard's only entry point, and it catches every
+    failure from `ensure_import("web")`. Replacing the remedy with a fixed `hermes pm repair`
+    discards the one thing `ensure_import` went to the trouble of setting — and repair repairs
+    the recorded environment rather than installing the `web` extra.
+
+    Run out-of-process: the branch under test is module-level import-time code that only runs
+    when fastapi is absent, so it cannot be re-entered in a live session.
+    """
+    import subprocess
+
+    script = '''
+import sys
+
+class _BlockFastapi:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "fastapi" or fullname.startswith("fastapi."):
+            raise ImportError("fastapi blocked for this test")
+        return None
+
+for name in [n for n in sys.modules if n == "fastapi" or n.startswith("fastapi.")]:
+    del sys.modules[name]
+sys.meta_path.insert(0, _BlockFastapi())
+
+import pm
+from pm.package import InstallError
+
+def _gated(extra):
+    raise InstallError("venv", f"extra {extra!r} is not supported on this platform",
+                       f"nothing to install - {extra!r} does not build for this platform")
+
+pm.ensure_import = _gated
+
+try:
+    import hermes_cli.web_server  # noqa: F401
+except SystemExit as exc:
+    print("EXIT:" + str(exc).replace("\\n", " | "))
+else:
+    print("EXIT:<no SystemExit raised>")
+'''
+    env = {**os.environ, "HERMES_HOME": str(tmp_path / "home"), "PYTHONPATH": str(_REPO_ROOT)}
+    (tmp_path / "home").mkdir(parents=True, exist_ok=True)
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                         env=env, cwd=str(_REPO_ROOT), timeout=180)
+    message = next((l[len("EXIT:"):] for l in out.stdout.splitlines() if l.startswith("EXIT:")), "")
+    assert message, f"probe produced no verdict.\nstdout={out.stdout}\nstderr={out.stderr}"
+    assert "does not build for this platform" in message, message
+    assert "hermes pm repair" not in message, message
