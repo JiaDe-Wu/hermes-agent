@@ -134,6 +134,21 @@ def _bounded_count(key: str, default: int) -> int:
     return value
 
 
+def _written(cfg: Dict[str, Any], key: str, resolved: int) -> bool:
+    """True when the user wrote *key* AND the value survived ``_bounded_count``.
+
+    A key that is absent carries no intent; a key whose value was rejected carries none either —
+    ``curator: {archive_after_days: 0}`` resolves to the default, so it must not be read as the
+    user having asked for that default. Only a surviving written value decides which half of the
+    lifecycle pair yields to the other."""
+    if key not in cfg:
+        return False
+    try:
+        return int(cfg[key]) == resolved
+    except (TypeError, ValueError):
+        return False
+
+
 def _lifecycle_days() -> tuple[int, int]:
     """``(stale_after_days, archive_after_days)`` as a *coherent* pair.
 
@@ -145,25 +160,45 @@ def _lifecycle_days() -> tuple[int, int]:
     unreachable at any age. Both values are individually valid, so nothing rejects them today.
 
     Archiving moves the skill out of ``skills/`` on the same unconfirmed pass a non-positive value
-    already falls back for, so an incoherent pair is repaired here — by deferring the archive, never
-    by pulling ``stale_after_days`` in. Unlike a non-positive count, the configured
-    ``stale_after_days`` carries usable intent and is the *non-destructive* half of the pair, so it
-    is honoured verbatim; substituting the archive default instead would still archive a skill idle
-    40 days under a configured ``stale_after_days: 60``, which is the case this exists to stop. The
-    gap is one day — the smallest that keeps ``stale`` reachable at this resolution — because any
-    wider one would be an invented threshold rather than a repair."""
+    already falls back for, so an incoherent pair is repaired here. **The half the user actually
+    wrote is honoured verbatim; the half that is only a default yields.** A default carries no
+    intent, so letting one override a configured number would be the repair discarding the very
+    thing it exists to protect — with a lone ``archive_after_days: 7``, deferring the archive means
+    resolving ``stale_after_days`` to the unconfigured 14 and then archiving at 15, more than
+    doubling the window the user asked for, under a warning naming a pair they never wrote.
+
+    When both are written, or neither is, the archive is the half that moves: ``stale_after_days``
+    is the non-destructive threshold, and substituting the archive default instead would still
+    archive a skill idle 40 days under a configured ``stale_after_days: 60``, the case this exists
+    to stop. Either way the gap is one day — the smallest that keeps ``stale`` reachable at this
+    resolution — because any wider one would be an invented threshold rather than a repair."""
+    cfg = _load_config()
     stale = _bounded_count("stale_after_days", DEFAULT_STALE_AFTER_DAYS)
     archive = _bounded_count("archive_after_days", DEFAULT_ARCHIVE_AFTER_DAYS)
-    if archive <= stale:
-        deferred = stale + 1
-        # Warned once per distinct pair, for the same reason _bounded_count is: the dashboard polls these.
-        marker = ("archive_after_days<=stale_after_days", (stale, archive))
+    if archive > stale:
+        return stale, archive
+    # Warned once per distinct pair, for the same reason _bounded_count is: the dashboard polls these.
+    def _warn(marker_key: str, message: str, *args) -> None:
+        marker = (marker_key, (stale, archive))
         if marker not in _warned_bad_values:
             _warned_bad_values.add(marker)
-            logger.warning("curator.archive_after_days (%d) must be > curator.stale_after_days (%d); "
-                           "archiving after %dd instead", archive, stale, deferred)
-        return stale, deferred
-    return stale, archive
+            logger.warning(message, *args)
+
+    if not _written(cfg, "stale_after_days", stale) and _written(cfg, "archive_after_days", archive):
+        # Only the archive threshold was written. Honour it and pull staleness in below it, floored
+        # at 1 like _bounded_count — at ``archive_after_days: 1`` there is no room for a distinct
+        # stale stage at day resolution, and the configured archival still wins.
+        pulled = max(1, archive - 1)
+        _warn("stale_after_days>=configured archive_after_days",
+              "curator.stale_after_days (%d, the default) must be < the configured "
+              "curator.archive_after_days (%d); marking stale after %dd instead",
+              stale, archive, pulled)
+        return pulled, archive
+    deferred = stale + 1
+    _warn("archive_after_days<=stale_after_days",
+          "curator.archive_after_days (%d) must be > curator.stale_after_days (%d); "
+          "archiving after %dd instead", archive, stale, deferred)
+    return stale, deferred
 
 
 def get_stale_after_days() -> int:

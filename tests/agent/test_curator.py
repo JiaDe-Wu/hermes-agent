@@ -258,6 +258,48 @@ def test_ordering_repair_warns_once_and_leaves_a_usable_pair_alone(curator_env, 
     assert caplog.records == []
 
 
+def test_a_lone_configured_archive_threshold_is_honoured_not_doubled(curator_env, monkeypatch):
+    """Only ``archive_after_days`` is written. The other half of the pair is the *default*, and a
+    default must not override a number the user typed: deferring the archive here would resolve
+    ``stale_after_days`` to the unconfigured 14 and archive at 15 — more than doubling the 7 days
+    the user asked for, under a warning naming a pair they never wrote. Staleness yields instead."""
+    c = curator_env["curator"]
+    u = curator_env["usage"]
+    skills_dir = curator_env["home"] / "skills"
+    _write_skill(skills_dir, "short-lived")
+    _backdate(u, "short-lived", 8)
+    monkeypatch.setattr(c, "_load_config", lambda: {"archive_after_days": 7})
+
+    assert (c.get_stale_after_days(), c.get_archive_after_days()) == (6, 7)
+
+    counts = c.apply_automatic_transitions()
+
+    # 8 days idle is past the archive threshold the user configured, so it archives — at 7, not 15.
+    assert counts["archived"] == 1
+    assert not (skills_dir / "short-lived").is_dir()
+
+
+def test_a_rejected_archive_value_does_not_count_as_configured(curator_env, monkeypatch):
+    """``archive_after_days: 0`` is rejected by ``_bounded_count`` and resolves to the default, so it
+    carries no intent and must not be read as the user having asked for that default — otherwise a
+    bad value would decide which half of the pair yields."""
+    c = curator_env["curator"]
+    monkeypatch.setattr(c, "_load_config", lambda: {"stale_after_days": 60, "archive_after_days": 0})
+
+    # archive falls back to 30, which is <= the configured 60: the archive is the half that moves.
+    assert (c.get_stale_after_days(), c.get_archive_after_days()) == (60, 61)
+
+
+def test_an_archive_threshold_of_one_day_leaves_no_room_for_a_stale_stage(curator_env, monkeypatch):
+    """The pulled staleness is floored at 1 like every other count, so ``archive_after_days: 1``
+    resolves to 1/1 rather than 0/1. There is no distinct stale stage at day resolution here, and
+    the configured archival still wins."""
+    c = curator_env["curator"]
+    monkeypatch.setattr(c, "_load_config", lambda: {"archive_after_days": 1})
+
+    assert (c.get_stale_after_days(), c.get_archive_after_days()) == (1, 1)
+
+
 def test_pinned_skill_is_never_touched(curator_env):
     c = curator_env["curator"]
     u = curator_env["usage"]
