@@ -33,8 +33,11 @@ def _gate_would_run(monkeypatch, cfg, idle_for_seconds):
     monkeypatch.setattr(curator, "should_run_now", lambda: True)
     monkeypatch.setattr(curator, "_claim_run", lambda: True)
     monkeypatch.setattr(curator, "_release_run_claim", lambda: None)
+    # **kwargs, not a fixed signature: `maybe_run_curator` forwards whatever the review pass takes
+    # (it gained `trigger=` for telemetry), and it swallows the TypeError a stale signature raises —
+    # which would read as "the idle gate blocked" and fake the result either way.
     monkeypatch.setattr(curator, "run_curator_review",
-                        lambda on_summary=None: started.append(True) or {"ok": True})
+                        lambda **kwargs: started.append(True) or {"ok": True})
     result = curator.maybe_run_curator(idle_for_seconds=idle_for_seconds)
     assert bool(started) == (result is not None), "spy and return value disagree"
     return bool(started)
